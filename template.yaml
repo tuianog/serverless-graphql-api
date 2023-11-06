@@ -1,0 +1,283 @@
+# docs reference: https://docs.aws.amazon.com/appsync/latest/devguide/resolver-mapping-template-reference-dynamodb.html
+
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  serverless-graphql-api
+
+  Sample SAM Template for serverless-graphql-api
+
+Resources:
+  Table:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: serverless-graphql-api-test-table
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: type
+          AttributeType: S
+        - AttributeName: datetime
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      GlobalSecondaryIndexes:
+        - IndexName: serverless-graphql-api-test-table-index-type-datetime
+          KeySchema:
+            - AttributeName: type
+              KeyType: HASH
+            - AttributeName: datetime
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  AppSyncDynamoDBServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: serverless-graphql-api-service-role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Principal:
+              Service:
+                - appsync.amazonaws.com
+
+  AppSyncDynamoDBServiceRolePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: serverless-graphql-api-appsync-dynamo
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'dynamodb:GetItem'
+              - 'dynamodb:PutItem'
+              - 'dynamodb:UpdateItem'
+              - 'dynamodb:DeleteItem'
+              - 'dynamodb:BatchGetItem'
+              - 'dynamodb:Query'
+              - 'dynamodb:Scan'
+            Resource: 
+              - !Join [ "", [ !GetAtt Table.Arn, "*" ] ]
+      Roles:
+        - !Ref AppSyncDynamoDBServiceRole
+
+  GraphQLApi:
+    Type: AWS::AppSync::GraphQLApi
+    Properties:
+      Name: graphql-api-test
+      ApiType: GRAPHQL
+      AuthenticationType: API_KEY
+
+  GraphQLApiKey:
+    Type: AWS::AppSync::ApiKey
+    Properties:
+     ApiId: !GetAtt GraphQLApi.ApiId
+
+  Schema:
+    Type: AWS::AppSync::GraphQLSchema
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      Definition: |
+        schema {
+          query: Query
+          mutation: Mutation
+        }
+        
+        type Query {
+          getEntry(id: ID!): Entry
+          listEntriesByType(type: String!): [Entry]
+          listEntries: [Entry]
+        }
+        
+        type Mutation {
+          addEntry(input: CreateEntryInput!): Entry
+          updateEntry(id: ID!, input: UpdateEntryInput!): Entry
+          deleteEntry(id: ID!): Entry
+        }
+        
+        type Entry {
+          id: ID!
+          name: String
+          type: String
+          datetime: String
+          epoch: Int
+        }
+        
+        input CreateEntryInput {
+          name: String
+          type: String
+          datetime: String
+          epoch: Int
+        }
+
+        input UpdateEntryInput {
+          name: String
+          type: String
+          datetime: String
+          epoch: Int
+        }
+    
+
+  DataSource:
+    Type: "AWS::AppSync::DataSource"
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      Name: serverless_graphql_api_test_table
+      Description: "DynamoDB table"
+      Type: AMAZON_DYNAMODB
+      ServiceRoleArn: !GetAtt AppSyncDynamoDBServiceRole.Arn
+      DynamoDBConfig:
+        TableName: !Ref Table
+        AwsRegion: !Sub ${AWS::Region}
+
+  GetAllResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      DataSourceName: !GetAtt DataSource.Name
+      FieldName: listEntries
+      Kind: UNIT
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "Scan",
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($context.result.items)
+      TypeName: Query
+
+  GetOneResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      DataSourceName: !GetAtt DataSource.Name
+      FieldName: getEntry
+      Kind: UNIT
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "GetItem",
+          "key": {
+            "id": $util.dynamodb.toDynamoDBJson($ctx.args.id),
+          },
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($context.result)
+      TypeName: Query
+  
+  GetByTypeResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      DataSourceName: !GetAtt DataSource.Name
+      FieldName: listEntriesByType
+      Kind: UNIT
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "Query",
+          "query" : {
+            "expression": "#type = :type",
+            "expressionNames" : {
+                "#type": "type"
+            },
+            "expressionValues" : {
+                ":type": $util.dynamodb.toDynamoDBJson($ctx.args.type)
+            }
+          },
+          "index": "serverless-graphql-api-test-table-index-type-datetime",
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($context.result.items)
+      TypeName: Query
+
+  DeleteResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      DataSourceName: !GetAtt DataSource.Name
+      FieldName: deleteEntry
+      Kind: UNIT
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "DeleteItem",
+          "key": {
+            "id": $util.dynamodb.toDynamoDBJson($ctx.args.id),
+          },
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($context.result)
+      TypeName: Mutation
+
+  CreateResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      DataSourceName: !GetAtt DataSource.Name
+      FieldName: addEntry
+      Kind: UNIT
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "PutItem",
+          "key": {
+            "id": $util.dynamodb.toDynamoDBJson($util.autoId()),
+          },
+          "attributeValues": $util.dynamodb.toMapValuesJson($ctx.args.input),
+          "condition": {
+            "expression": "attribute_not_exists(#id)",
+            "expressionNames": {
+              "#id": "id",
+            },
+          },
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($context.result)
+      TypeName: Mutation
+
+  UpdateResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      DataSourceName: !GetAtt DataSource.Name
+      FieldName: updateEntry
+      Kind: UNIT
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "UpdateItem",
+          "key": {
+            "id" : $util.dynamodb.toDynamoDBJson($ctx.args.id)
+          },
+          "update" : {
+            "expression" : "SET #name = :name",
+            "expressionNames": {
+                "#name" : "name"
+            },
+            "expressionValues": {
+              ":name" : $util.dynamodb.toDynamoDBJson($ctx.args.input.name)
+            }
+          },
+          "condition": {
+            "expression": "attribute_exists(id)"
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($context.result)
+      TypeName: Mutation
+
+Outputs:
+  GraphQLApi:
+    Description: "GraphQLApi endpoint URL"
+    Value: !GetAtt  GraphQLApi.GraphQLUrl
+
